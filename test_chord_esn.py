@@ -196,6 +196,56 @@ class TestCHORDESN(unittest.TestCase):
         preds = pipeline.predict(inputs)
         self.assertEqual(preds.shape, (T, 3))
 
+    def test_train_chord_esn_pipeline_orchestrator(self):
+        """Verify out-of-class training orchestrator train_chord_esn_pipeline correctness."""
+        from implementation.reservoir import ChordESNPipeline, train_chord_esn_pipeline
+        
+        # Instantiate pipeline
+        pipeline = ChordESNPipeline(
+            simplicial_complex=self.dec,
+            input_size=2,
+            density=0.2,
+            seed=42,
+            lambda_x=0.6,
+            lambda_y=0.4,
+            lambda_z=0.5,
+            T_proj=5,
+            epsilon=1e-4,
+            lambda_ex=0.5,
+            lambda_co=0.3,
+            lambda_ha=0.04,
+            tau_0=0.01,
+            tau_1=0.01,
+            tau_2=0.01
+        )
+        
+        T = 30
+        inputs = np.random.RandomState(42).randn(T, 2)
+        targets = np.random.RandomState(43).randn(T, 3)
+        washout = 10
+        lambda_R = 1e-4
+        
+        expected_dim = 2 * self.num_vertices + 2 * self.N_e + self.N_f + 1
+        
+        # Execute the orchestrator
+        W_out = train_chord_esn_pipeline(
+            pipeline=pipeline,
+            inputs=inputs,
+            targets=targets,
+            washout=washout,
+            lambda_R=lambda_R
+        )
+        
+        # Verify weight shapes and values
+        self.assertEqual(W_out.shape, (3, expected_dim))
+        self.assertEqual(pipeline.W_out.shape, (3, expected_dim))
+        np.testing.assert_array_almost_equal(W_out, pipeline.W_out)
+        
+        # Verify prediction works with the trained weights
+        preds = pipeline.predict(inputs)
+        self.assertEqual(preds.shape, (T, 3))
+
 if __name__ == "__main__":
     unittest.main()
+
 

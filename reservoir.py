@@ -866,4 +866,71 @@ class ChordESNPipeline(ChordESN):
         Phi = np.array(all_features)
         return Phi @ self.W_out.T
 
+def train_chord_esn_pipeline(
+    pipeline,
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    washout: int = 100,
+    lambda_R: float = 1e-6
+) -> np.ndarray:
+    """
+    Out-of-class training orchestrator routine for ChordESNPipeline.
+    
+    1. Runs teacher-forced trajectory stepping across the entire input sequence,
+       discarding the initial transient washout period.
+    2. Stacks the feature matrices into a dense array layout and executes
+       closed-form Ridge Regression (Tikhonov Regularization) using a Cholesky solver:
+       W_out = Y_target @ Phi^T @ (Phi @ Phi^T + lambda_R * I)^-1
+       
+    Args:
+        pipeline: An instance of ChordESNPipeline.
+        inputs: Input sequence array of shape (T, d_in).
+        targets: Target sequence array of shape (T, d_out).
+        washout: Number of initial steps to discard.
+        lambda_R: Regularization penalty hyperparameter.
+        
+    Returns:
+        W_out: Trained readout weight matrix of shape (d_out, d_phi).
+    """
+    T, d_in = inputs.shape
+    if d_in != pipeline.input_size:
+        raise ValueError(f"Input size mismatch. Expected {pipeline.input_size}, got {d_in}.")
+        
+    pipeline.reset()
+    
+    # 1. Run trajectory stepping and collect features
+    features_list = []
+    for t in range(T):
+        phi_t = pipeline.step(inputs[t], t)
+        if t >= washout:
+            features_list.append(phi_t)
+            
+    # Stack features into Phi of shape (D_phi, T_train)
+    # Each column of Phi is a feature vector phi_t
+    Phi = np.column_stack(features_list)
+    
+    # Targets for the training steps after washout: shape (d_out, T_train)
+    Y_target = targets[washout:].T
+    
+    D_phi, T_train = Phi.shape
+    
+    # 2. Execute Ridge Regression using Cholesky solver factorization
+    # Solve (Phi @ Phi.T + lambda_R * I) W_out.T = Phi @ Y_target.T
+    A = Phi @ Phi.T + lambda_R * np.eye(D_phi)
+    B = Phi @ Y_target.T
+    
+    # Cholesky factorization of A
+    c, low = la.cho_factor(A, lower=True)
+    # Solve A X = B -> X has shape (D_phi, d_out)
+    X = la.cho_solve((c, low), B)
+    
+    # W_out = X.T has shape (d_out, D_phi)
+    W_out = X.T
+    
+    # Assign the trained weights back to the pipeline instance
+    pipeline.W_out = W_out
+    
+    return W_out
+
+
 
