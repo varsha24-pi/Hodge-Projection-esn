@@ -444,7 +444,7 @@ class SplitLeakChordESN(ChordESN):
             
             # 1. State update transition (mechanical core)
             raw_update = np.tanh(W_res.dot(r) + self.W_in @ u_t + self.b)
-            s_y = r + raw_update
+            s_y = raw_update
             
             # 2. Intermittent Hodge decomposition
             if t % self.T_proj == 0:
