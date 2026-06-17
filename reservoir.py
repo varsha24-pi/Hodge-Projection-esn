@@ -482,3 +482,388 @@ class SplitLeakChordESN(ChordESN):
                 
         return np.array(all_states), r
 
+class ChordESNPipeline(ChordESN):
+    def __init__(
+        self,
+        simplicial_complex,
+        input_size: int,
+        density: float = 0.1,
+        input_scaling: float = 1.0,
+        regularization: float = 1e-6,
+        eta: float = 0.1,
+        seed: int = 42,
+        lambda_x: float = 0.5,
+        lambda_y: float = 0.5,
+        lambda_z: float = 0.5,
+        T_proj: int = 10,
+        epsilon: float = 1e-4,
+        lambda_ex: float = 0.5,
+        lambda_co: float = 0.3,
+        lambda_ha: float = 0.05,
+        tau_0: float = 0.01,
+        tau_1: float = 0.01,
+        tau_2: float = 0.01
+    ):
+        self.simplicial_complex = simplicial_complex
+        self.input_size = input_size
+        self.density = density
+        self.input_scaling = input_scaling
+        self.regularization = regularization
+        self.eta = eta
+        self.seed = seed
+        
+        self.lambda_x = lambda_x
+        self.lambda_y = lambda_y
+        self.lambda_z = lambda_z
+        
+        self.T_proj = T_proj
+        self.epsilon = epsilon
+        self.lambda_ex = lambda_ex
+        self.lambda_co = lambda_co
+        self.lambda_ha = lambda_ha
+        
+        self.tau_0 = tau_0
+        self.tau_1 = tau_1
+        self.tau_2 = tau_2
+        
+        # Stability configuration and mixing loops creation
+        self.configure_stability_pipeline()
+        
+        # Initialize input weight matrices (dense, uniform)
+        dec = self.simplicial_complex
+        random_state = np.random.RandomState(self.seed + 1)
+        self.W_in_0 = random_state.uniform(
+            -self.input_scaling, self.input_scaling, size=(dec.num_vertices, self.input_size)
+        )
+        self.W_in_1 = random_state.uniform(
+            -self.input_scaling, self.input_scaling, size=(dec.N_e, self.input_size)
+        )
+        if dec.N_f > 0:
+            self.W_in_2 = random_state.uniform(
+                -self.input_scaling, self.input_scaling, size=(dec.N_f, self.input_size)
+            )
+        else:
+            self.W_in_2 = np.zeros((0, self.input_size))
+            
+        # Biases
+        self.b_x = random_state.uniform(-0.1, 0.1, size=(dec.num_vertices,))
+        self.b_y = random_state.uniform(-0.1, 0.1, size=(dec.N_e,))
+        if dec.N_f > 0:
+            self.b_z = random_state.uniform(-0.1, 0.1, size=(dec.N_f,))
+        else:
+            self.b_z = np.zeros(0)
+            
+        # Precompute projection matrices for Split-Leak
+        self.A_ex = (dec.d0.T @ dec.star_1 @ dec.d0 + self.epsilon * dec.star_0).tocsr()
+        if dec.N_f > 0:
+            self.A_co = (dec.d1 @ dec.star_1_inv @ dec.d1.T + self.epsilon * dec.star_2).tocsr()
+        else:
+            self.A_co = None
+            
+        # Readout weights
+        self.W_out = None
+        
+        # Reset states
+        self.reset()
+
+    def configure_stability_pipeline(self):
+        dec = self.simplicial_complex
+        N_v = dec.num_vertices
+        N_e = dec.N_e
+        N_f = dec.N_f
+        
+        random_state = np.random.RandomState(self.seed)
+        
+        # 1. Pull sparse random internal mixing loops
+        Wx_raw = self._create_sparse_random_matrix(N_v, self.density, random_state)
+        Wy_raw = self._create_sparse_random_matrix(N_e, self.density, random_state)
+        Wz_raw = self._create_sparse_random_matrix(N_f, self.density, random_state)
+        
+        # 2. Use power iteration to estimate operator norms
+        nx = self._estimate_operator_norm(Wx_raw, steps=15)
+        ny = self._estimate_operator_norm(Wy_raw, steps=15)
+        nz = self._estimate_operator_norm(Wz_raw, steps=15)
+        
+        # Normalize
+        self.Wx = Wx_raw / nx if nx > 0 else Wx_raw
+        self.Wy = Wy_raw / ny if ny > 0 else Wy_raw
+        self.Wz = Wz_raw / nz if nz > 0 else Wz_raw
+        
+        # 3. Estimate norms of DEC operators
+        n_d0 = self._estimate_operator_norm(dec.d0, steps=15)
+        n_delta0 = self._estimate_operator_norm(dec.delta_0, steps=15)
+        if N_f > 0:
+            n_d1 = self._estimate_operator_norm(dec.d1, steps=15)
+            n_delta1 = self._estimate_operator_norm(dec.delta_1, steps=15)
+        else:
+            n_d1 = 0.0
+            n_delta1 = 0.0
+            
+        # 4. Decay tuning loop to satisfy block-Lipschitz check
+        s_x = 0.8
+        s_y = 0.8
+        s_z = 0.8
+        alpha = 0.3
+        beta = 0.3
+        gamma = 0.3
+        
+        adjusted_eta = self.eta
+        max_leak = max(self.lambda_x, self.lambda_y, self.lambda_z)
+        if max_leak <= self.eta:
+            adjusted_eta = max_leak / 2.0
+            
+        decay = 0.95
+        for i in range(500):
+            row_sum1 = (1.0 - self.lambda_x) + self.lambda_x * s_x
+            row_sum2 = (1.0 - self.lambda_y) + self.lambda_y * s_y
+            row_sum3 = (1.0 - self.lambda_z) + self.lambda_z * s_z if N_f > 0 else 0.0
+            
+            max_row_sum = max(row_sum1, row_sum2, row_sum3)
+            if max_row_sum < 1.0 - adjusted_eta:
+                break
+                
+            if i < 100:
+                s_x = max(0.4, s_x * decay)
+                s_y = max(0.4, s_y * decay)
+                s_z = max(0.4, s_z * decay)
+                alpha = max(0.05, alpha * decay)
+                beta = max(0.05, beta * decay)
+                gamma = max(0.05, gamma * decay)
+            else:
+                s_x *= decay
+                s_y *= decay
+                s_z *= decay
+                alpha *= decay
+                beta *= decay
+                gamma *= decay
+                
+            if i > 200:
+                adjusted_eta *= 0.5
+                
+        self.s_x_scale = s_x
+        self.s_y_scale = s_y
+        self.s_z_scale = s_z
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        
+        # Scale matrices
+        self.W_x = self.Wx * self.s_x_scale
+        self.W_y = self.Wy * self.s_y_scale
+        self.W_z = self.Wz * self.s_z_scale
+
+    def reset(self):
+        """Resets all persistent and transient states to zero."""
+        dec = self.simplicial_complex
+        self.x = np.zeros(dec.num_vertices)
+        self.y = np.zeros(dec.N_e)
+        self.z = np.zeros(dec.N_f)
+        
+        self.s_x = np.zeros(dec.num_vertices)
+        self.s_y = np.zeros(dec.N_e)
+        self.s_z = np.zeros(dec.N_f)
+        
+        self.cached_y_ex = np.zeros(dec.N_e)
+        self.cached_y_co = np.zeros(dec.N_e)
+        self.cached_y_ha = np.zeros(dec.N_e)
+
+    def get_state(self) -> tuple:
+        """Returns the current state of the pipeline as a tuple."""
+        return (
+            self.x.copy(),
+            self.y.copy(),
+            self.z.copy(),
+            self.s_x.copy(),
+            self.s_y.copy(),
+            self.s_z.copy(),
+            self.cached_y_ex.copy(),
+            self.cached_y_co.copy(),
+            self.cached_y_ha.copy(),
+        )
+
+    def set_state(self, state: tuple):
+        """Sets the current state of the pipeline from a tuple."""
+        (
+            self.x,
+            self.y,
+            self.z,
+            self.s_x,
+            self.s_y,
+            self.s_z,
+            self.cached_y_ex,
+            self.cached_y_co,
+            self.cached_y_ha,
+        ) = [arr.copy() for arr in state]
+
+    def step(self, u_t, t):
+        """
+        Executes a single recurrent update step for input u_t at time t.
+        
+        Args:
+            u_t: Input vector of shape (d_in,)
+            t: Current integer timestamp indicator.
+            
+        Returns:
+            phi_t: Lifted feature readout vector of shape (2*N_v + 2*N_e + N_f + 1,)
+        """
+        dec = self.simplicial_complex
+        
+        # 1. 1-Lipschitz innovative mixing dynamics over tanh
+        # Vertex mixing (using bias b_x)
+        term_x = self.W_x.dot(self.x) + dec.delta_0.dot(self.y) + self.W_in_0 @ u_t + self.b_x
+        xi_t_x = np.tanh(term_x)
+        
+        # Edge mixing (using bias b_y)
+        if dec.N_f > 0:
+            delta1_z = dec.delta_1.dot(self.z)
+        else:
+            delta1_z = np.zeros(dec.N_e)
+        term_y = self.W_y.dot(self.y) + self.alpha * dec.d0.dot(self.x) + self.beta * delta1_z + self.W_in_1 @ u_t + self.b_y
+        xi_t_y = np.tanh(term_y)
+        
+        # Face mixing (using bias b_z)
+        if dec.N_f > 0:
+            term_z = self.W_z.dot(self.z) + self.gamma * dec.d1.dot(self.y) + self.W_in_2 @ u_t + self.b_z
+            xi_t_z = np.tanh(term_z)
+        else:
+            xi_t_z = np.zeros(0)
+            
+        # 2. Leaky linear integration across all degrees to get persistent frames
+        self.s_x = (1.0 - self.lambda_x) * self.s_x + self.lambda_x * xi_t_x
+        self.s_y = (1.0 - self.lambda_y) * self.s_y + self.lambda_y * xi_t_y
+        if dec.N_f > 0:
+            self.s_z = (1.0 - self.lambda_z) * self.s_z + self.lambda_z * xi_t_z
+        else:
+            self.s_z = np.zeros(0)
+            
+        # 3. Wire persistent edge state vector through split-leak filter framework
+        if t % self.T_proj == 0:
+            # Solve exact projection
+            b_ex = dec.d0.T @ (dec.star_1 @ self.s_y)
+            p, _ = spla.cg(self.A_ex, b_ex, **CG_KWARGS)
+            y_ex = dec.d0 @ p
+            
+            # Solve dual coexact projection
+            if self.A_co is not None and dec.N_f > 0:
+                b_co = dec.d1 @ self.s_y
+                q, _ = spla.cg(self.A_co, b_co, **CG_KWARGS)
+                y_co = dec.star_1_inv @ (dec.d1.T @ q)
+            else:
+                y_co = np.zeros(dec.N_e)
+                
+            # Extract harmonic cycle residue
+            y_ha = self.s_y - y_ex - y_co
+            
+            # Cache
+            self.cached_y_ex = y_ex
+            self.cached_y_co = y_co
+            self.cached_y_ha = y_ha
+        else:
+            y_ex = self.cached_y_ex
+            y_co = self.cached_y_co
+            y_ha = self.cached_y_ha
+            
+        s_y_tilde = self.s_y - self.lambda_ex * y_ex - self.lambda_co * y_co - self.lambda_ha * y_ha
+        
+        # 4. Explicit, nonexpansive Euler heat equation steps via Laplacians
+        self.x = self.s_x - self.tau_0 * dec.L0.dot(self.s_x)
+        self.y = s_y_tilde - self.tau_1 * dec.L1.dot(s_y_tilde)
+        if dec.N_f > 0:
+            self.z = self.s_z - self.tau_2 * dec.L2.dot(self.s_z)
+        else:
+            self.z = np.zeros(0)
+            
+        # 5. Lifted feature readout vector
+        d0_x = dec.d0.dot(self.x)
+        delta0_y = dec.delta_0.dot(self.y)
+        if dec.N_f > 0:
+            d1_y = dec.d1.dot(self.y)
+        else:
+            d1_y = np.zeros(0)
+            
+        phi_t = np.concatenate([
+            self.x,
+            d0_x,
+            delta0_y,
+            d1_y,
+            y_ha,
+            np.array([1.0])
+        ])
+        
+        return phi_t
+
+    def forward_pipeline(self, inputs: np.ndarray, washout: int = 0) -> np.ndarray:
+        """
+        Runs the reservoir pipeline simulation over the input sequence.
+        
+        Args:
+            inputs: Array of shape (T, d_in)
+            washout: Number of initial steps to discard.
+            
+        Returns:
+            features: Lifted readout features array of shape (T - washout, d_phi)
+        """
+        T, d_in = inputs.shape
+        if d_in != self.input_size:
+            raise ValueError(f"Input size mismatch. Expected {self.input_size}, got {d_in}.")
+            
+        self.reset()
+        
+        all_features = []
+        for t in range(T):
+            phi_t = self.step(inputs[t], t)
+            if t >= washout:
+                all_features.append(phi_t)
+                
+        return np.array(all_features)
+
+    def fit(self, inputs: np.ndarray, targets: np.ndarray, washout: int = 0):
+        """
+        Trains the readout weights W_out using Ridge Regression.
+        
+        Args:
+            inputs: input sequence of shape (T, d_in)
+            targets: target sequence of shape (T, d_out)
+            washout: number of initial steps to discard
+        """
+        Phi = self.forward_pipeline(inputs, washout=washout)
+        targets_cut = targets[washout:]
+        
+        N_features = Phi.shape[1]
+        I_reg = np.eye(N_features)
+        I_reg[-1, -1] = 0.0  # Do not regularize the bias term
+        
+        self.W_out = targets_cut.T @ Phi @ la.pinv(Phi.T @ Phi + self.regularization * I_reg)
+
+    def predict(self, inputs: np.ndarray, initial_state: tuple = None) -> np.ndarray:
+        """
+        Predicts outputs for given inputs.
+        
+        Args:
+            inputs: input sequence of shape (T, d_in)
+            initial_state: optional state tuple to restore before prediction
+            
+        Returns:
+            predictions: predicted outputs of shape (T, d_out)
+        """
+        if self.W_out is None:
+            raise ValueError("Model must be fitted before making predictions.")
+            
+        T, d_in = inputs.shape
+        if d_in != self.input_size:
+            raise ValueError(f"Input size mismatch. Expected {self.input_size}, got {d_in}.")
+            
+        if initial_state is not None:
+            self.set_state(initial_state)
+        else:
+            self.reset()
+            
+        all_features = []
+        for t in range(T):
+            phi_t = self.step(inputs[t], t)
+            all_features.append(phi_t)
+            
+        Phi = np.array(all_features)
+        return Phi @ self.W_out.T
+
+

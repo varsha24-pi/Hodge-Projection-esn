@@ -2,7 +2,7 @@ import numpy as np
 import time
 from implementation.utils import build_delaunay_complex, generate_lorenz63
 from implementation.simplicial import DECOperatorEngine
-from implementation.reservoir import ChordESN, SplitLeakChordESN
+from implementation.reservoir import ChordESN, SplitLeakChordESN, ChordESNPipeline
 
 def run_benchmarks():
     print("======================================================================")
@@ -73,6 +73,23 @@ def run_benchmarks():
             lambda_co=0.3,
             lambda_ha=0.04,
             regularization=1e-6
+        ),
+        "ChordESN execution pipeline": ChordESNPipeline(
+            simplicial_complex=dec,
+            input_size=3,
+            seed=100,
+            lambda_x=0.5,
+            lambda_y=0.5,
+            lambda_z=0.5,
+            T_proj=5,
+            epsilon=1e-4,
+            lambda_ex=0.5,
+            lambda_co=0.3,
+            lambda_ha=0.04,
+            tau_0=0.01,
+            tau_1=0.01,
+            tau_2=0.01,
+            regularization=1e-6
         )
     }
     
@@ -91,7 +108,11 @@ def run_benchmarks():
         
         # Predict on test data
         # We pass the final state from training as the initial state for testing
-        _, last_state = model.forward(tr_inputs, washout=0)
+        if isinstance(model, ChordESNPipeline):
+            last_state = model.get_state()
+        else:
+            _, last_state = model.forward(tr_inputs, washout=0)
+            
         start_time = time.time()
         ts_pred = model.predict(ts_inputs, initial_state=last_state)
         eval_time = time.time() - start_time

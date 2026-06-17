@@ -135,5 +135,67 @@ class TestCHORDESN(unittest.TestCase):
         # Verify that states are bounded
         self.assertTrue(np.all(np.abs(states) < 10.0))
 
+    def test_chord_esn_pipeline(self):
+        """Verify ChordESNPipeline execution, stability, feature extraction, and fitting."""
+        from implementation.reservoir import ChordESNPipeline
+        
+        # Instantiate pipeline
+        pipeline = ChordESNPipeline(
+            simplicial_complex=self.dec,
+            input_size=2,
+            density=0.2,
+            seed=42,
+            lambda_x=0.6,
+            lambda_y=0.4,
+            lambda_z=0.5,
+            T_proj=5,
+            epsilon=1e-4,
+            lambda_ex=0.5,
+            lambda_co=0.3,
+            lambda_ha=0.04,
+            tau_0=0.01,
+            tau_1=0.01,
+            tau_2=0.01
+        )
+        
+        # 1. Verify that states are reset to zero
+        self.assertEqual(len(pipeline.x), self.num_vertices)
+        self.assertEqual(len(pipeline.y), self.N_e)
+        self.assertEqual(len(pipeline.z), self.N_f)
+        np.testing.assert_array_equal(pipeline.x, np.zeros(self.num_vertices))
+        np.testing.assert_array_equal(pipeline.y, np.zeros(self.N_e))
+        np.testing.assert_array_equal(pipeline.z, np.zeros(self.N_f))
+        
+        # 2. Verify stability parameters are set correctly
+        # row_sum must be < 1.0 - eta
+        row_sum1 = (1.0 - pipeline.lambda_x) + pipeline.lambda_x * pipeline.s_x_scale
+        self.assertLess(row_sum1, 1.0 - pipeline.eta)
+        
+        # 3. Run a step and verify the returned readout vector shape
+        u_t = np.array([0.5, -0.2])
+        phi_t = pipeline.step(u_t, t=0)
+        
+        expected_dim = 2 * self.num_vertices + 2 * self.N_e + self.N_f + 1
+        self.assertEqual(len(phi_t), expected_dim)
+        
+        # Last element of phi_t should be 1.0 (constant bias)
+        self.assertEqual(phi_t[-1], 1.0)
+        
+        # 4. Verify forward_pipeline runs and returns correct shape
+        T = 20
+        inputs = np.random.RandomState(99).randn(T, 2)
+        features = pipeline.forward_pipeline(inputs, washout=5)
+        self.assertEqual(features.shape, (T - 5, expected_dim))
+        
+        # 5. Verify fit and predict
+        targets = np.random.RandomState(100).randn(T, 3)
+        pipeline.fit(inputs, targets, washout=5)
+        self.assertIsNotNone(pipeline.W_out)
+        self.assertEqual(pipeline.W_out.shape, (3, expected_dim))
+        
+        preds = pipeline.predict(inputs)
+        self.assertEqual(preds.shape, (T, 3))
+
 if __name__ == "__main__":
     unittest.main()
+
