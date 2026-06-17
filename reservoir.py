@@ -867,7 +867,7 @@ class ChordESNPipeline(ChordESN):
         return Phi @ self.W_out.T
 
 def train_chord_esn_pipeline(
-    pipeline,
+    pipeline: "ChordESNPipeline",
     inputs: np.ndarray,
     targets: np.ndarray,
     washout: int = 100,
@@ -931,6 +931,79 @@ def train_chord_esn_pipeline(
     pipeline.W_out = W_out
     
     return W_out
+
+if __name__ == "__main__":
+    from implementation.utils import build_delaunay_complex, generate_lorenz63
+    from implementation.simplicial import DECOperatorEngine
+    
+    print("Executing end-to-end mock execution block for ChordESNPipeline...")
+    
+    # 1. Setup Oriented 2-Simplicial Complex
+    coords, edges, faces, hodge_0, hodge_1, hodge_2 = build_delaunay_complex(num_points=12, seed=42)
+    dec = DECOperatorEngine(
+        num_vertices=len(coords),
+        edges=edges,
+        faces=faces,
+        hodge_0=hodge_0,
+        hodge_1=hodge_1,
+        hodge_2=hodge_2,
+        normalize=True
+    )
+    dec.precompute_projectors()
+    
+    # 2. Instantiate ChordESNPipeline
+    pipeline = ChordESNPipeline(
+        simplicial_complex=dec,
+        input_size=3,
+        density=0.2,
+        seed=100,
+        lambda_x=0.6,
+        lambda_y=0.4,
+        lambda_z=0.5,
+        T_proj=5,
+        epsilon=1e-4,
+        lambda_ex=0.5,
+        lambda_co=0.3,
+        lambda_ha=0.04,
+        tau_0=0.01,
+        tau_1=0.01,
+        tau_2=0.01,
+        regularization=1e-6
+    )
+    
+    # 3. Generate synthetic Lorenz-63 chaotic trajectory and standardize it
+    data = generate_lorenz63(T=500, dt=0.01, seed=42)
+    data = (data - np.mean(data, axis=0)) / np.std(data, axis=0)
+    inputs = data[:-1]
+    targets = data[1:]
+    
+    # Train/Test Split
+    washout = 50
+    train_len = 300
+    
+    tr_inputs = inputs[:train_len]
+    tr_targets = targets[:train_len]
+    ts_inputs = inputs[train_len:]
+    ts_targets = targets[train_len:]
+    
+    # 4. Train using out-of-class orchestrator routine
+    print("Training ChordESNPipeline using Ridge Regression Cholesky orchestrator...")
+    W_out = train_chord_esn_pipeline(
+        pipeline=pipeline,
+        inputs=tr_inputs,
+        targets=tr_targets,
+        washout=washout,
+        lambda_R=1e-6
+    )
+    print(f"Readout weights trained. Shape: {W_out.shape}")
+    
+    # 5. Predict on test sequence
+    last_state = pipeline.get_state()
+    predictions = pipeline.predict(ts_inputs, initial_state=last_state)
+    
+    mse = np.mean((predictions - ts_targets) ** 2)
+    print(f"Mock execution completed successfully. Test MSE: {mse:.6f}")
+
 
 
 
