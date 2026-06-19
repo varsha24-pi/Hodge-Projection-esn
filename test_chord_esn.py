@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
 import unittest
 import numpy as np
 import scipy.sparse as sp
@@ -5,6 +9,7 @@ import scipy.linalg as la
 from implementation.simplicial import DECOperatorEngine
 from implementation.reservoir import ChordESN, SplitLeakChordESN
 from implementation.utils import build_delaunay_complex
+
 
 class TestCHORDESN(unittest.TestCase):
     def setUp(self):

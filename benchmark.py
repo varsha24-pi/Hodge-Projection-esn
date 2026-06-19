@@ -1,8 +1,13 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
 import numpy as np
 import time
 from implementation.utils import build_delaunay_complex, generate_lorenz63
 from implementation.simplicial import DECOperatorEngine
 from implementation.reservoir import ChordESN, SplitLeakChordESN, ChordESNPipeline
+
 
 def run_benchmarks():
     print("======================================================================")

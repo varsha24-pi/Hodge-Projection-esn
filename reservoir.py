@@ -933,6 +933,10 @@ def train_chord_esn_pipeline(
     return W_out
 
 if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent.parent))
+    
     from implementation.utils import build_delaunay_complex, generate_lorenz63
     from implementation.simplicial import DECOperatorEngine
     
